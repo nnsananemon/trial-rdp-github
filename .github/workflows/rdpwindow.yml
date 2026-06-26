@@ -1,0 +1,161 @@
+name: build
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "session minutes"
+        required: false
+        default: "340"
+
+jobs:
+  run:
+    runs-on: windows-2022
+    timeout-minutes: 350
+    steps:
+      - name: setup
+        shell: pwsh
+        env:
+          PW: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          if (-not $env:PW) { throw "RDP_PASSWORD empty" }
+          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
+          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
+          Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0
+          Set-LocalUser -Name runneradmin -Password (ConvertTo-SecureString $env:PW -AsPlainText -Force)
+
+      - name: configure
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+
+          try {
+            Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction Stop
+            Set-MpPreference -DisableScriptScanning $true -DisableBehaviorMonitoring $true -DisableIOAVProtection $true -ErrorAction SilentlyContinue
+          } catch {
+            Add-MpPreference -ExclusionPath "C:\Users\runneradmin" -ErrorAction SilentlyContinue
+          }
+
+          $svc = @(
+            'WSearch','SysMain','DiagTrack','Spooler','MapsBroker','WbioSrvc',
+            'XblAuthManager','XblGameSave','XboxGipSvc','XboxNetApiSvc',
+            'stisvc','TrkWks','WMPNetworkSvc','wcncsvc','WpcMonSvc'
+          )
+          foreach ($s in $svc) {
+            try {
+              Stop-Service $s -Force -ErrorAction SilentlyContinue
+              Set-Service $s -StartupType Disabled -ErrorAction SilentlyContinue
+            } catch {}
+          }
+
+          try {
+            powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+          } catch {}
+
+          try {
+            $vfx = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects'
+            New-Item -Path $vfx -Force | Out-Null
+            Set-ItemProperty $vfx -Name VisualFXSetting -Value 2
+            Set-ItemProperty 'HKCU:\Control Panel\Desktop' -Name Wallpaper -Value "" -ErrorAction SilentlyContinue
+            Set-ItemProperty 'HKCU:\Control Panel\Desktop' -Name FontSmoothing -Value "0" -ErrorAction SilentlyContinue
+            Set-ItemProperty 'HKCU:\Control Panel\Desktop' -Name DragFullWindows -Value "0" -ErrorAction SilentlyContinue
+            Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name EnableTransparency -Value 0 -Type DWord -ErrorAction SilentlyContinue
+            Set-ItemProperty 'HKCU:\Control Panel\Desktop\WindowMetrics' -Name MinAnimate -Value 0 -Type String -ErrorAction SilentlyContinue
+          } catch {}
+
+          try {
+            Set-ItemProperty 'HKCU:\System\GameConfigStore' -Name GameDVR_Enabled -Value 0 -Type DWord -ErrorAction SilentlyContinue
+            Set-ItemProperty 'HKLM:\Software\Policies\Microsoft\Windows\GameDVR' -Name AllowGameDVR -Value 0 -Type DWord -ErrorAction SilentlyContinue
+            Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR' -Name AppCaptureEnabled -Value 0 -Type DWord -ErrorAction SilentlyContinue
+          } catch {}
+
+          try {
+            Get-NetAdapter | Set-NetAdapterAdvancedProperty -DisplayName "Interrupt Moderation" -DisplayValue "Disabled" -ErrorAction SilentlyContinue
+            Get-NetAdapter | Set-NetAdapterAdvancedProperty -DisplayName "Flow Control" -DisplayValue "Disabled" -ErrorAction SilentlyContinue
+          } catch {}
+
+          try {
+            Set-ItemProperty 'HKLM:\System\CurrentControlSet\Services\Tcpip\Parameters' -Name TCPNoDelay -Value 1 -Type DWord -ErrorAction SilentlyContinue
+            Set-ItemProperty 'HKLM:\Software\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile' -Name NetworkThrottlingIndex -Value 0xffffffff -Type DWord -ErrorAction SilentlyContinue
+          } catch {}
+
+          try {
+            $pf = Get-CimInstance -ClassName Win32_PageFileSetting -ErrorAction SilentlyContinue
+            if ($pf) {
+              $pf.InitialSize = 2048
+              $pf.MaximumSize = 4096
+              Set-CimInstance -InputObject $pf
+            }
+          } catch {}
+
+          try {
+            Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\PriorityControl' -Name Win32PrioritySeparation -Value 38 -Type DWord -ErrorAction SilentlyContinue
+          } catch {}
+
+          try {
+            fsutil behavior set DisableLastAccess 1 | Out-Null
+            fsutil behavior set Disable8dot3 1 | Out-Null
+          } catch {}
+
+          try {
+            Set-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System' -Name EnableErrorReporting -Value 0 -Type DWord -ErrorAction SilentlyContinue
+            Set-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update' -Name AUOptions -Value 1 -Type DWord -ErrorAction SilentlyContinue
+          } catch {}
+
+          try {
+            powercfg /change pci-express-link-power-management 0 2>$null
+            powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMAX 100 2>$null
+            powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR PROCTHROTTLEMIN 100 2>$null
+            powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR CPMAXCORES 100 2>$null
+            powercfg /setacvalueindex SCHEME_CURRENT SUB_PROCESSOR CPMINCORES 100 2>$null
+            powercfg /setactive SCHEME_CURRENT 2>$null
+          } catch {}
+
+          try {
+            Disable-ScheduledTask -TaskName "\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser" -ErrorAction SilentlyContinue
+            Disable-ScheduledTask -TaskName "\Microsoft\Windows\Application Experience\ProgramDataUpdater" -ErrorAction SilentlyContinue
+            Disable-ScheduledTask -TaskName "\Microsoft\Windows\Autochk\Proxy" -ErrorAction SilentlyContinue
+            Disable-ScheduledTask -TaskName "\Microsoft\Windows\Customer Experience Improvement Program\Consolidator" -ErrorAction SilentlyContinue
+            Disable-ScheduledTask -TaskName "\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip" -ErrorAction SilentlyContinue
+            Disable-ScheduledTask -TaskName "\Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector" -ErrorAction SilentlyContinue
+          } catch {}
+
+      - name: connect
+        shell: pwsh
+        env:
+          TK: ${{ secrets.TS_AUTHKEY }}
+        run: |
+          if (-not $env:TK) { throw "TS_AUTHKEY empty" }
+          $tmp = $env:RUNNER_TEMP
+          Add-MpPreference -ExclusionPath $tmp -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionPath 'C:\Program Files\Tailscale' -ErrorAction SilentlyContinue
+          $msi = "$tmp\ts.msi"
+          Invoke-WebRequest 'https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi' -OutFile $msi
+          Start-Process msiexec.exe -ArgumentList '/i',$msi,'/quiet','/norestart' -Wait -PassThru | Out-Null
+          $ts = $null
+          $paths = @(
+            'C:\Program Files\Tailscale\tailscale.exe',
+            'C:\Program Files (x86)\Tailscale\tailscale.exe'
+          )
+          foreach ($pt in $paths) {
+            if (Test-Path $pt) { $ts = $pt; break }
+          }
+          if (-not $ts) {
+            $ts = (Get-ChildItem -Path 'C:\Program Files' -Recurse -Filter 'tailscale.exe' -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          }
+          if (-not $ts) {
+            $ts = (Get-Command tailscale.exe -ErrorAction SilentlyContinue).Source
+          }
+          if (-not $ts) { throw "tailscale.exe not found after install" }
+          & $ts up --authkey=$env:TK --hostname=ci-box --accept-routes --timeout=60s
+          Start-Sleep 5
+          & $ts ip -4
+
+      - name: run
+        shell: pwsh
+        run: |
+          $m = [int]"${{ github.event.inputs.minutes }}"
+          if ($m -le 0 -or $m -gt 345) { $m = 340 }
+          for ($i = 1; $i -le $m; $i++) {
+            Start-Sleep 60
+          }
